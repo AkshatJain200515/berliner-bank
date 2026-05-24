@@ -25,12 +25,12 @@ def get_db():
         )
     """)
 
-    # Add created_at to existing databases that were created before this column existed
+    
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
         conn.commit()
     except sqlite3.OperationalError:
-        pass  # Column already exists, nothing to do
+        pass 
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
@@ -57,7 +57,7 @@ def get_db():
     return conn
 
 
-# Alias so setup.py can call init_db() to pre-create the schema
+
 def init_db():
     conn = get_db()
     conn.close()
