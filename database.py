@@ -25,12 +25,11 @@ def get_db():
         )
     """)
 
-    
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
         conn.commit()
     except sqlite3.OperationalError:
-        pass 
+        pass  
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
@@ -55,7 +54,6 @@ def get_db():
 
     conn.commit()
     return conn
-
 
 
 def init_db():
