@@ -6,7 +6,6 @@ DB_PATH = "berliner_bank.db"
 
 
 def get_db():
-    """Opens a connection to the SQLite database and creates tables if they don't exist yet."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
@@ -62,10 +61,6 @@ def init_db():
 
 
 def log_event(event_type, detail=""):
-    """
-    Writes a security-relevant event to both the audit_log table and stdout.
-    Covers logins, failures, lockouts, transfers, and registrations.
-    """
     now = datetime.datetime.now().isoformat()
     print(f"[AUDIT | {event_type}] {detail}")
 
