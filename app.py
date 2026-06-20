@@ -158,6 +158,24 @@ BASE = """
     <div class="container pb-5" style="max-width:780px;">
         {{ content | safe }}
     </div>
+           db.execute("UPDATE users SET failed_logins = ? WHERE username = ?", (failures, username))
+            log_event("LOGIN_FAIL", f"Wrong password for: {username} (attempt {failures})")
+        db.commit()
+        db.close()
+        return "Invalid credentials.", 401
+
+    
+    if not auth.verify_mfa(user["mfa_seed"], mfa_code):
+        log_event("MFA_FAIL", f"MFA mismatch for: {username}")
+        db.close()
+        return "Invalid MFA code.", 401
+
+    
+    db.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE username = ?", (username,))
+    db.commit()
+    db.close()
+
+    session["username"] = username
 </body>
 </html>
 """
@@ -205,34 +223,55 @@ def index():
 
 @app.route("/register")
 def register_page():
-   form = """
+    form = """
     <div class="row justify-content-center">
     <div class="col-md-7">
     <div class="card-panel">
-        <h4 class="fw-bold mb-1">Sign In</h4>
-        <p class="text-muted small mb-4">Access your Berliner Bank account securely.</p>
+        <h4 class="fw-bold mb-1">Open an Account</h4>
+        <p class="text-muted small mb-3">Create your secure Berliner Bank profile.</p>
 
-        <form action="/login" method="POST">
+        <div class="p-3 rounded mb-4" style="background:#f0f7f2; border:1px solid #c5dccb; font-size:0.82rem; color:#2d5a3d;">
+            <strong>Password rules:</strong> minimum 8 characters, at least one uppercase letter,
+            one lowercase letter, and one number.
+        </div>
+        <tr>
+            <td class="text-muted mono" style="font-size:0.82rem;">{ts}</td>
+            <td>{escape(t['sender'])} &rarr; {escape(t['recipient'])}</td>
+            <td class="fw-semibold mono">&euro;{t['amount']:.2f}</td>
+            <td>{risk}</td>
+            <td>{sig_badge}</td>
+        </tr>
+        """
+
+    page = f"""
+    <!-- Balance & profile card -->
+    <div class="card-panel mb-3">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <div class="label">Logged in as</div>
+                <div class="fw-bold mono" style="font-size:1.1rem;">{username}</div>
+            </div>
+            <div class="text-end">
+                <div class="label">Available Balance</div>
+                <div class="fw-bold mono" style="font-size:1.75rem;">&euro;{user['balance']:.2f}</div>
+            </div>
+        </div>
+    </div>
+        <form action="/register" method="POST">
             <div class="mb-3">
                 <div class="label">Username</div>
                 <input type="text" name="username" class="form-control" required autocomplete="off">
             </div>
-            <div class="mb-3">
+            <div class="mb-4">
                 <div class="label">Password</div>
                 <input type="password" name="password" class="form-control" required>
             </div>
-            <div class="mb-4">
-                <div class="label">MFA Code</div>
-                <input type="text" name="mfa_code" class="form-control mono"
-                       placeholder="6-digit code" maxlength="6" required autocomplete="off">
-            </div>
-            <button type="submit" class="btn btn-primary w-100">Sign In</button>
+            <button type="submit" class="btn btn-primary w-100">Create Account</button>
         </form>
 
-        <div class="divider"></div>
-        <p class="text-center small text-muted mb-0">
-            No account yet? <a href="/register" class="text-dark fw-semibold text-decoration-none">Register here</a>
-        </p>
+        <div class="text-center mt-3">
+            <a href="/" class="small text-muted text-decoration-none">Back to login</a>
+        </div>
     </div>
     </div>
     </div>
@@ -305,7 +344,9 @@ def register():
 
 @app.route("/login", methods=["POST"])
 def login():
-    
+    username = request.form.get("username", "").strip().lower()
+    password = request.form.get("password", "")
+    mfa_code = request.form.get("mfa_code", "").strip()
 
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -315,10 +356,27 @@ def login():
         db.close()
         return "Invalid credentials.", 401
 
-    
+     page = f"""
+    <!-- Balance & profile card -->
+    <div class="card-panel mb-3">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <div class="label">Logged in as</div>
+                <div class="fw-bold mono" style="font-size:1.1rem;">{username}</div>
+            </div>
+            <div class="text-end">
+                <div class="label">Available Balance</div>
+                <div class="fw-bold mono" style="font-size:1.75rem;">&euro;{user['balance']:.2f}</div>
+            </div>
+        </div>
+    </div>
     if user["locked_until"]:
         lock_expiry = datetime.datetime.fromisoformat(user["locked_until"])
-        
+        if datetime.datetime.now() < lock_expiry:
+            log_event("LOCKOUT_BLOCKED", f"Login blocked - account locked: {username}")
+            db.close()
+            remaining = int((lock_expiry - datetime.datetime.now()).total_seconds() / 60) + 1
+            return f"Account is locked due to repeated failed logins. Try again in ~{remaining} minute(s).", 423
 
     
     computed_hash, _ = auth.hash_password(password, user["salt"])
@@ -332,23 +390,159 @@ def login():
             )
             log_event("ACCOUNT_LOCKED", f"Account locked after {failures} failures: {username}")
         else:
-            db.execute("UPDATE users SET failed_logins = ? WHERE username = ?", (failures, username))
-            log_event("LOGIN_FAIL", f"Wrong password for: {username} (attempt {failures})")
-        db.commit()
-        db.close()
-        return "Invalid credentials.", 401
-
-    
-    if not auth.verify_mfa(user["mfa_seed"], mfa_code):
-        log_event("MFA_FAIL", f"MFA mismatch for: {username}")
-        db.close()
-        return "Invalid MFA code.", 401
-
-    
-    db.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE username = ?", (username,))
-    db.commit()
-    db.close()
-
-    session["username"] = username
+     
     log_event("LOGIN_OK", f"Session started for: {username}")
     return redirect(url_for("dashboard"))
+
+
+@app.route("/dashboard")
+def dashboard():
+    if "username" not in session:
+        return redirect(url_for("index"))
+
+    username = session["username"]
+    db = get_db()
+    user = db.execute("SELECT balance FROM users WHERE username = ?", (username,)).fetchone()
+    txns = db.execute(
+        "SELECT * FROM transactions WHERE sender = ? OR recipient = ? ORDER BY id DESC",
+        (username, username)
+    ).fetchall()
+    db.close()
+
+    rows = ""
+    for t in txns:
+        
+        valid = auth.verify_transaction(t["sender"], t["recipient"], t["amount"], t["timestamp"], t["mac"])
+
+        sig_badge = '<span class="badge-ok">&#10003; Valid</span>' if valid else '<span class="badge-bad">&#9888; Tampered</span>'
+
+        if t["risk_flag"] == "HIGH_VALUE":
+            risk = '<span class="badge-warn">High Value</span>'
+        else:
+            risk = '<span class="text-muted small">Normal</span>'
+
+        
+        ts = t["timestamp"][:16].replace("T", " ")
+        rows += f"""
+
+
+    
+
+    <!-- Transaction history -->
+    <div class="card-panel">
+        <h6 class="fw-bold mb-3">Transaction History</h6>
+        <div class="table-responsive">
+            <table class="table mb-0">
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Parties</th>
+                        <th>Amount</th>
+                        <th>Risk</th>
+                        <th>MAC Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows if rows else '<tr><td colspan="5" class="text-center text-muted py-4">No transactions yet.</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+        <div class="divider mb-0"></div>
+        <div class="d-flex justify-content-between pt-3">
+            <a href="/profile" class="small text-muted text-decoration-none fw-medium">My Profile</a>
+            <a href="/logout" class="small text-danger text-decoration-none fw-medium">Log Out</a>
+        </div>
+    </div>
+    """
+    return render_template_string(BASE, content=page)
+
+
+@app.route("/profile")
+def profile():
+    if "username" not in session:
+        return redirect(url_for("index"))
+
+    username = session["username"]
+    db = get_db()
+    user = db.execute("SELECT username, balance, created_at FROM users WHERE username = ?", (username,)).fetchone()
+    tx_count = db.execute(
+        "SELECT COUNT(*) as cnt FROM transactions WHERE sender = ? OR recipient = ?",
+        (username, username)
+    ).fetchone()["cnt"]
+    db.close()
+
+    joined = user["created_at"] if user["created_at"] else "N/A"
+
+    page = f"""
+    <div class="row justify-content-center">
+    <div class="col-md-8">
+
+    <div class="card-panel mb-3">
+        <div class="d-flex justify-content-between align-items-start mb-4">
+            <div>
+                <h4 class="fw-bold mb-1">My Profile</h4>
+                <p class="text-muted small mb-0">Account details and security settings.</p>
+            </div>
+            <a href="/dashboard" class="btn-ghost btn">← Dashboard</a>
+        </div>
+
+        <div class="row g-3 mb-2">
+            <div class="col-sm-4">
+                <div class="label">Username</div>
+                <div class="fw-semibold mono">{escape(username)}</div>
+            </div>
+            <div class="col-sm-4">
+                <div class="label">Account Balance</div>
+                <div class="fw-semibold mono">&euro;{user['balance']:.2f}</div>
+            </div>
+            <div class="col-sm-4">
+                <div class="label">Member Since</div>
+                <div class="fw-semibold">{joined}</div>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="row g-3">
+            <div class="col-sm-4">
+                <div class="label">Total Transactions</div>
+                <div class="fw-semibold">{tx_count}</div>
+            </div>
+            <div class="col-sm-4">
+                <div class="label">MFA Status</div>
+                <div><span class="badge-ok">&#10003; Enabled</span></div>
+            </div>
+            <div class="col-sm-4">
+                <div class="label">Account Status</div>
+                <div><span class="badge-ok">&#10003; Active</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card-panel">
+        <h6 class="fw-bold mb-1">Change Password</h6>
+        <p class="text-muted small mb-3">
+            You must enter your current MFA code to confirm the change.
+        </p>
+        <form action="/reset_password" method="POST">
+            <div class="mb-3">
+                <div class="label">New Password</div>
+                <input type="password" name="new_password" class="form-control" required>
+            </div>
+            <div class="mb-4">
+                <div class="label">Confirm New Password</div>
+                <input type="password" name="confirm_password" class="form-control" required>
+            </div>
+            <div class="mb-4">
+                <div class="label">MFA Code (required to confirm)</div>
+                <input type="text" name="mfa_code" class="form-control mono"
+                       placeholder="6-digit code" maxlength="6" required autocomplete="off">
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Update Password</button>
+        </form>
+    </div>
+
+    </div>
+    </div>
+    """
+    return render_template_string(BASE, content=page)
