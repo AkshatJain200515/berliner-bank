@@ -67,7 +67,6 @@ def log_event(event_type, detail=""):
     try:
         conn = get_db()
         conn.execute(
-            "INSERT INTO audit_log (event, detail, logged_at) VALUES (?, ?, ?)",
             (event_type, detail, now)
         )
         conn.commit()
