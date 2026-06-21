@@ -158,24 +158,6 @@ BASE = """
     <div class="container pb-5" style="max-width:780px;">
         {{ content | safe }}
     </div>
-           db.execute("UPDATE users SET failed_logins = ? WHERE username = ?", (failures, username))
-            log_event("LOGIN_FAIL", f"Wrong password for: {username} (attempt {failures})")
-        db.commit()
-        db.close()
-        return "Invalid credentials.", 401
-
-    
-    if not auth.verify_mfa(user["mfa_seed"], mfa_code):
-        log_event("MFA_FAIL", f"MFA mismatch for: {username}")
-        db.close()
-        return "Invalid MFA code.", 401
-
-    
-    db.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE username = ?", (username,))
-    db.commit()
-    db.close()
-
-    session["username"] = username
 </body>
 </html>
 """
@@ -234,29 +216,7 @@ def register_page():
             <strong>Password rules:</strong> minimum 8 characters, at least one uppercase letter,
             one lowercase letter, and one number.
         </div>
-        <tr>
-            <td class="text-muted mono" style="font-size:0.82rem;">{ts}</td>
-            <td>{escape(t['sender'])} &rarr; {escape(t['recipient'])}</td>
-            <td class="fw-semibold mono">&euro;{t['amount']:.2f}</td>
-            <td>{risk}</td>
-            <td>{sig_badge}</td>
-        </tr>
-        """
 
-    page = f"""
-    <!-- Balance & profile card -->
-    <div class="card-panel mb-3">
-        <div class="d-flex justify-content-between align-items-center">
-            <div>
-                <div class="label">Logged in as</div>
-                <div class="fw-bold mono" style="font-size:1.1rem;">{username}</div>
-            </div>
-            <div class="text-end">
-                <div class="label">Available Balance</div>
-                <div class="fw-bold mono" style="font-size:1.75rem;">&euro;{user['balance']:.2f}</div>
-            </div>
-        </div>
-    </div>
         <form action="/register" method="POST">
             <div class="mb-3">
                 <div class="label">Username</div>
@@ -356,20 +316,7 @@ def login():
         db.close()
         return "Invalid credentials.", 401
 
-     page = f"""
-    <!-- Balance & profile card -->
-    <div class="card-panel mb-3">
-        <div class="d-flex justify-content-between align-items-center">
-            <div>
-                <div class="label">Logged in as</div>
-                <div class="fw-bold mono" style="font-size:1.1rem;">{username}</div>
-            </div>
-            <div class="text-end">
-                <div class="label">Available Balance</div>
-                <div class="fw-bold mono" style="font-size:1.75rem;">&euro;{user['balance']:.2f}</div>
-            </div>
-        </div>
-    </div>
+    
     if user["locked_until"]:
         lock_expiry = datetime.datetime.fromisoformat(user["locked_until"])
         if datetime.datetime.now() < lock_expiry:
@@ -390,7 +337,24 @@ def login():
             )
             log_event("ACCOUNT_LOCKED", f"Account locked after {failures} failures: {username}")
         else:
-     
+            db.execute("UPDATE users SET failed_logins = ? WHERE username = ?", (failures, username))
+            log_event("LOGIN_FAIL", f"Wrong password for: {username} (attempt {failures})")
+        db.commit()
+        db.close()
+        return "Invalid credentials.", 401
+
+    
+    if not auth.verify_mfa(user["mfa_seed"], mfa_code):
+        log_event("MFA_FAIL", f"MFA mismatch for: {username}")
+        db.close()
+        return "Invalid MFA code.", 401
+
+    
+    db.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE username = ?", (username,))
+    db.commit()
+    db.close()
+
+    session["username"] = username
     log_event("LOGIN_OK", f"Session started for: {username}")
     return redirect(url_for("dashboard"))
 
@@ -424,9 +388,49 @@ def dashboard():
         
         ts = t["timestamp"][:16].replace("T", " ")
         rows += f"""
+        <tr>
+            <td class="text-muted mono" style="font-size:0.82rem;">{ts}</td>
+            <td>{escape(t['sender'])} &rarr; {escape(t['recipient'])}</td>
+            <td class="fw-semibold mono">&euro;{t['amount']:.2f}</td>
+            <td>{risk}</td>
+            <td>{sig_badge}</td>
+        </tr>
+        """
 
+    page = f"""
+    <!-- Balance & profile card -->
+    <div class="card-panel mb-3">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <div class="label">Logged in as</div>
+                <div class="fw-bold mono" style="font-size:1.1rem;">{username}</div>
+            </div>
+            <div class="text-end">
+                <div class="label">Available Balance</div>
+                <div class="fw-bold mono" style="font-size:1.75rem;">&euro;{user['balance']:.2f}</div>
+            </div>
+        </div>
+    </div>
 
-    
+    <!-- Transfer form -->
+    <div class="card-panel mb-3">
+        <h6 class="fw-bold mb-3">Transfer Funds</h6>
+        <form action="/transfer" method="POST">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="label">Recipient Username</div>
+                    <input type="text" name="recipient" class="form-control" required autocomplete="off">
+                </div>
+                <div class="col-md-6">
+                    <div class="label">Amount (&euro;)</div>
+                    <input type="number" step="0.01" min="0.01" name="amount" class="form-control" required>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary w-100">Sign &amp; Send Transfer</button>
+                </div>
+            </div>
+        </form>
+    </div>
 
     <!-- Transaction history -->
     <div class="card-panel">
@@ -546,3 +550,128 @@ def profile():
     </div>
     """
     return render_template_string(BASE, content=page)
+
+
+@app.route("/reset_password", methods=["POST"])
+def reset_password():
+    if "username" not in session:
+        return redirect(url_for("index"))
+
+    username = session["username"]
+    new_password = request.form.get("new_password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    mfa_code = request.form.get("mfa_code", "").strip()
+
+    if new_password != confirm_password:
+        return "Passwords do not match.", 400
+
+    if not auth.check_password_strength(new_password):
+        return "New password does not meet the security requirements (min 8 chars, uppercase, lowercase, number).", 400
+
+    db = get_db()
+    user = db.execute("SELECT mfa_seed FROM users WHERE username = ?", (username,)).fetchone()
+
+    
+    if not auth.verify_mfa(user["mfa_seed"], mfa_code):
+        log_event("RESET_FAIL", f"Password reset rejected - MFA mismatch for: {username}")
+        db.close()
+        return "Invalid MFA code. Password was not changed.", 401
+
+    new_hash, new_salt = auth.hash_password(new_password)
+
+    db.execute(
+        "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
+        (new_hash, new_salt, username)
+    )
+    db.commit()
+    db.close()
+
+    log_event("PASSWORD_RESET", f"Password successfully updated for: {username}")
+
+    confirmation = """
+    <div class="row justify-content-center">
+    <div class="col-md-6">
+    <div class="card-panel text-center">
+        <div style="font-size:2.5rem; margin-bottom:0.75rem;">&#10003;</div>
+        <h4 class="fw-bold mb-1">Password Updated</h4>
+        <p class="text-muted small mb-4">Your new password has been saved securely.</p>
+        <a href="/dashboard" class="btn btn-primary px-4">Back to Dashboard</a>
+    </div>
+    </div>
+    </div>
+    """
+    return render_template_string(BASE, content=confirmation)
+
+
+@app.route("/transfer", methods=["POST"])
+def transfer():
+    if "username" not in session:
+        return redirect(url_for("index"))
+
+    sender = session["username"]
+    recipient = request.form.get("recipient", "").strip().lower()
+
+    try:
+        amount = float(request.form.get("amount", 0))
+    except ValueError:
+        return "Invalid amount.", 400
+
+    if amount <= 0:
+        return "Amount must be greater than zero.", 400
+
+    if sender == recipient:
+        return "Cannot transfer to your own account.", 400
+
+    db = get_db()
+
+    sender_row = db.execute("SELECT balance FROM users WHERE username = ?", (sender,)).fetchone()
+    if sender_row["balance"] < amount:
+        db.close()
+        return "Insufficient balance.", 400
+
+    recipient_row = db.execute("SELECT username FROM users WHERE username = ?", (recipient,)).fetchone()
+    if not recipient_row:
+        db.close()
+        return "Recipient account not found.", 404
+
+   
+    risk = "HIGH_VALUE" if amount > 1000.0 else "NORMAL"
+
+    timestamp = datetime.datetime.now().isoformat()
+
+    
+    mac = auth.sign_transaction(sender, recipient, amount, timestamp)
+
+    try:
+        db.execute("UPDATE users SET balance = balance - ? WHERE username = ?", (amount, sender))
+        db.execute("UPDATE users SET balance = balance + ? WHERE username = ?", (amount, recipient))
+        db.execute(
+            "INSERT INTO transactions (sender, recipient, amount, timestamp, mac, risk_flag) VALUES (?, ?, ?, ?, ?, ?)",
+            (sender, recipient, amount, timestamp, mac, risk)
+        )
+        db.commit()
+        log_event("TRANSFER", f"{sender} -> {recipient}: €{amount:.2f} | Risk: {risk}")
+    except sqlite3.Error as e:
+        db.rollback()
+        db.close()
+        return f"Transfer failed due to a database error: {e}", 500
+    finally:
+        db.close()
+
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/logout")
+def logout():
+    username = session.get("username", "unknown")
+    session.clear()
+    log_event("LOGOUT", f"Session ended for: {username}")
+    return redirect(url_for("index"))
+
+
+if __name__ == "__main__":
+    print("\n" + "=" * 55)
+    print("  Berliner Bank - Local Development Server")
+    print("  http://127.0.0.1:5000")
+    print("=" * 55 + "\n")
+    app.run(debug=True, port=5000)
